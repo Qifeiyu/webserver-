@@ -31,6 +31,8 @@ void addfd( int epollfd, int fd, bool one_shot ) {
     if(one_shot) {
         event.events | EPOLLONESHOT;
     }
+
+    
     /*
     EPOLLSHOT的作用主要用于多线程中
     epoll在某次循环中唤醒一个事件，并用某个工作进程去处理该fd，此后如果不注册EPOLLSHOT,
