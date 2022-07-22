@@ -86,7 +86,7 @@ bool threadpool< T >::append(T * request) {
     //操作工作队列一定要加锁，因为他们被所有线程共享
     m_queuelocker.lock();
     //请求队列的数量大于我设置的最大请求队列数
-    if(m_workqueue.size() >= m_max_requests) {
+    if(m_workqueue.size() > m_max_requests) {
         m_queuelocker.unlock();
         return false;
     }

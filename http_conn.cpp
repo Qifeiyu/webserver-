@@ -16,34 +16,26 @@ const char* doc_root = "/root/webserver/resources";
 int http_conn::m_user_count = 0; 
 int http_conn::m_epollfd = -1;
 //设置文件描述符非阻塞
-void setnonblocking(int fd) {
-    int old_flag = fcntl(fd, F_GETFL);
-    old_flag |= O_NONBLOCK;
-    fcntl(fd, F_SETFL, old_flag);
+int setnonblocking( int fd ) {
+    int old_option = fcntl( fd, F_GETFL );
+    int new_option = old_option | O_NONBLOCK;
+    fcntl( fd, F_SETFL, new_option );
+    return old_option;
 }
 void addfd( int epollfd, int fd, bool one_shot ) {
     epoll_event event;
     event.data.fd = fd;
-    //EPOLLIN是有数据达到，可以读取
-    //连接断开可以检测
     event.events = EPOLLIN | EPOLLRDHUP |EPOLLET;
-
-    if(one_shot) {
-        event.events | EPOLLONESHOT;
+    if(one_shot) 
+    {
+        // 防止同一个通信被不同的线程处理
+        event.events |= EPOLLONESHOT;
     }
-
-    
-    /*
-    EPOLLSHOT的作用主要用于多线程中
-    epoll在某次循环中唤醒一个事件，并用某个工作进程去处理该fd，此后如果不注册EPOLLSHOT,
-    在该fd时间如果工作线程处理的不及时，主线程仍会唤醒这个事件，并另派线程池中另一个线程也来处理这个fd。
-    为了避免这种情况，需要在注册时间时加上EPOLLSHOT标志，EPOLLSHOT相当于说，某次循环中epoll_wait唤醒该事件fd后，
-    就会从注册中删除该fd,也就是说以后不会epollfd的表格中将不会再有这个fd,也就不会出现多个线程同时处理一个fd的情况。
-    */
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
-    //设置文件描述符非阻塞,et模式要把文件描述符设置为非阻塞
-    setnonblocking(fd);
+    // 设置文件描述符非阻塞
+    setnonblocking(fd);  
 }
+
 void removefd( int epollfd, int fd ) {
     epoll_ctl( epollfd, EPOLL_CTL_DEL, fd, 0 );
     close(fd);
@@ -70,6 +62,28 @@ void http_conn::init(int sockfd, const sockaddr_in& addr) {
     addfd(m_epollfd, m_sockfd, true);
     m_user_count++;//总用户数增加
     init();
+}
+
+void http_conn::init()
+{
+    bytes_to_send = 0;
+    bytes_have_send = 0;
+
+    m_check_state = CHECK_STATE_REQUESTLINE;    // 初始状态为检查请求行
+    m_linger = false;       // 默认不保持链接  Connection : keep-alive保持连接
+
+    m_method = GET;         // 默认请求方式为GET
+    m_url = 0;              
+    m_version = 0;
+    m_content_length = 0;
+    m_host = 0;
+    m_start_line = 0;
+    m_checked_idx = 0;
+    m_read_idx = 0;
+    m_write_idx = 0;
+    bzero(m_read_buf, READ_BUFFER_SIZE);
+    bzero(m_write_buf, READ_BUFFER_SIZE);
+    bzero(m_real_file, FILENAME_LEN);
 }
 
 //关闭连接
@@ -106,52 +120,6 @@ bool http_conn::read(){
     return true; 
 }
 
-// 主状态机，解析请求
-//根据是请求行，请求头，和体分别做解析操作
-http_conn::HTTP_CODE http_conn::process_read() {
-    LINE_STATUS line_status = LINE_OK;
-    HTTP_CODE ret = NO_REQUEST;
-    char* text = 0;
-    while (((m_check_state == CHECK_STATE_CONTENT) && (line_status == LINE_OK))
-                || ((line_status = parse_line()) == LINE_OK)) {
-        // 获取一行数据
-        text = get_line();
-        m_start_line = m_checked_idx;
-        //printf( "got 1 http line: %s\n", text );
-
-        switch ( m_check_state ) {
-            case CHECK_STATE_REQUESTLINE: {
-                ret = parse_request_line( text );
-                if ( ret == BAD_REQUEST ) {
-                    return BAD_REQUEST;
-                }
-                break;
-            }
-            case CHECK_STATE_HEADER: {
-                ret = parse_headers( text );
-                if ( ret == BAD_REQUEST ) {
-                    return BAD_REQUEST;
-                } else if ( ret == GET_REQUEST ) {
-                    return do_request();
-                }
-                break;
-            }
-            case CHECK_STATE_CONTENT: {
-                ret = parse_content( text );
-                if ( ret == GET_REQUEST ) {
-                    return do_request();
-                }
-                line_status = LINE_OPEN;
-                break;
-            }
-            default: {
-                return INTERNAL_ERROR;
-            }
-        }
-    }
-    return NO_REQUEST;
-}
-
 // 解析一行，判断依据\r\n
 http_conn::LINE_STATUS http_conn::parse_line() {
     char temp;
@@ -179,6 +147,48 @@ http_conn::LINE_STATUS http_conn::parse_line() {
     return LINE_OPEN;
 }
 
+// 解析HTTP请求行，获得请求方法，目标URL,以及HTTP版本号
+http_conn::HTTP_CODE http_conn::parse_request_line(char* text) {
+    // GET /index.html HTTP/1.1
+    m_url = strpbrk(text, " \t"); // 判断第二个参数中的字符哪个在text中最先出现
+    if (! m_url) { 
+        return BAD_REQUEST;
+    }
+    // GET\0/index.html HTTP/1.1
+    *m_url++ = '\0';    // 置位空字符，字符串结束符
+    char* method = text;
+    if ( strcasecmp(method, "GET") == 0 ) { // 忽略大小写比较
+        m_method = GET;
+    } else {
+        return BAD_REQUEST;
+    }
+
+    //m_url += strspn(m_url, " \t");
+    m_version = strpbrk( m_url, " \t" );
+    if (!m_version) {
+        return BAD_REQUEST;
+    }
+    *m_version++ = '\0';
+    // /index.html HTTP/1.1
+    // 检索字符串 str1 中第一个不在字符串 str2 中出现的字符下标。
+    //m_version += strspn(m_version, " \t");
+    if (strcasecmp( m_version, "HTTP/1.1") != 0 ) {
+        return BAD_REQUEST;
+    }
+    /**
+     * http://192.168.110.129:10000/index.html
+    */
+    if (strncasecmp(m_url, "http://", 7) == 0 ) {   
+        m_url += 7;
+        // 在参数 str 所指向的字符串中搜索第一次出现字符 '/'（一个无符号字符）的位置。并返回这个位置，如果没有返回空指针
+        m_url = strchr( m_url, '/' );
+    }
+    if ( !m_url || m_url[0] != '/' ) {
+        return BAD_REQUEST;
+    }
+    m_check_state = CHECK_STATE_HEADER; // 检查状态变成检查头
+    return NO_REQUEST;
+}
 
 // 解析HTTP请求的一个头部信息
 //在循环里逐行解析请求头，如果碰到以下字段就保存请求头的信息
@@ -216,48 +226,6 @@ http_conn::HTTP_CODE http_conn::parse_headers(char* text) {
     return NO_REQUEST;
 }
 
-// 解析HTTP请求行，获得请求方法，目标URL,以及HTTP版本号
-http_conn::HTTP_CODE http_conn::parse_request_line(char* text) {
-    // GET /index.html HTTP/1.1
-    m_url = strpbrk(text, " \t"); // 判断第二个参数中的字符哪个在text中最先出现
-    if (! m_url) { 
-        return BAD_REQUEST;
-    }
-    // GET\0/index.html HTTP/1.1
-    *m_url++ = '\0';    // 置位空字符，字符串结束符
-    char* method = text;
-    if ( strcasecmp(method, "GET") == 0 ) { // 忽略大小写比较
-        m_method = GET;
-    } else {
-        return BAD_REQUEST;
-    }
-
-    m_url += strspn(m_url, " \t");
-    m_version = strpbrk( m_url, " \t" );
-    if (!m_version) {
-        return BAD_REQUEST;
-    }
-    *m_version++ = '\0';
-    // /index.html HTTP/1.1
-    // 检索字符串 str1 中第一个不在字符串 str2 中出现的字符下标。
-    m_version += strspn(m_version, " \t");
-    if (strcasecmp( m_version, "HTTP/1.1") != 0 ) {
-        return BAD_REQUEST;
-    }
-    /**
-     * http://192.168.110.129:10000/index.html
-    */
-    if (strncasecmp(m_url, "http://", 7) == 0 ) {   
-        m_url += 7;
-        // 在参数 str 所指向的字符串中搜索第一次出现字符 '/'（一个无符号字符）的位置。并返回这个位置，如果没有返回空指针
-        m_url = strchr( m_url, '/' );
-    }
-    if ( !m_url || m_url[0] != '/' ) {
-        return BAD_REQUEST;
-    }
-    m_check_state = CHECK_STATE_HEADER; // 检查状态变成检查头
-    return NO_REQUEST;
-}
 // 我们没有真正解析HTTP请求的消息体，只是判断它是否被完整的读入了
 http_conn::HTTP_CODE http_conn::parse_content( char* text ) {
     if ( m_read_idx >= ( m_content_length + m_checked_idx ) )
@@ -268,46 +236,62 @@ http_conn::HTTP_CODE http_conn::parse_content( char* text ) {
     return NO_REQUEST;
 }
 
-void http_conn::init()
-{
-    bytes_to_send = 0;
-    bytes_have_send = 0;
 
-    m_check_state = CHECK_STATE_REQUESTLINE;    // 初始状态为检查请求行
-    m_linger = false;       // 默认不保持链接  Connection : keep-alive保持连接
+// 主状态机，解析请求
+//根据是请求行，请求头，和体分别做解析操作
+http_conn::HTTP_CODE http_conn::process_read() {
+    LINE_STATUS line_status = LINE_OK;
+    HTTP_CODE ret = NO_REQUEST;
+    char* text = 0;
+    while (((m_check_state == CHECK_STATE_CONTENT) && (line_status == LINE_OK))
+                || ((line_status = parse_line()) == LINE_OK)) {
+        // 获取一行数据
+        text = get_line();
+        m_start_line = m_checked_idx;
+        printf( "got 1 http line: %s\n", text );
 
-    m_method = GET;         // 默认请求方式为GET
-    m_url = 0;              
-    m_version = 0;
-    m_content_length = 0;
-    m_host = 0;
-    m_start_line = 0;
-    m_checked_idx = 0;
-    m_read_idx = 0;
-    m_write_idx = 0;
-    bzero(m_read_buf, READ_BUFFER_SIZE);
-    bzero(m_write_buf, READ_BUFFER_SIZE);
-    bzero(m_real_file, FILENAME_LEN);
+        switch ( m_check_state ) {
+            case CHECK_STATE_REQUESTLINE: {
+                ret = parse_request_line( text );
+                if ( ret == BAD_REQUEST ) {
+                    return BAD_REQUEST;
+                }
+                break;
+            }
+            case CHECK_STATE_HEADER: {
+                ret = parse_headers( text );
+                if ( ret == BAD_REQUEST ) {
+                    return BAD_REQUEST;
+                } else if ( ret == GET_REQUEST ) {
+                    return do_request();
+                }
+                break;
+            }
+            case CHECK_STATE_CONTENT: {
+                ret = parse_content( text );
+                if ( ret == GET_REQUEST ) {
+                    return do_request();
+                }
+                line_status = LINE_OPEN;
+                break;
+            }
+            default: {
+                return INTERNAL_ERROR;
+            }
+        }
+    }
+    return NO_REQUEST;
 }
 
-// 由线程池中的工作线程调用，这是处理HTTP请求的入口函数
-//这里因为设置了EPOLLONESHOT事件，所以每次使用都要再modfd一下
-void http_conn::process() {
 
-    // 解析HTTP请求
-    HTTP_CODE read_ret = process_read();
-    if ( read_ret == NO_REQUEST ) {
-        modfd( m_epollfd, m_sockfd, EPOLLIN );
-        return;
-    }
-    
-    // 生成响应
-    bool write_ret = process_write( read_ret );
-    if ( !write_ret ) {
-        close_conn();
-    }
-    modfd( m_epollfd, m_sockfd, EPOLLOUT);
-}
+
+
+
+
+
+
+
+
 
 http_conn::HTTP_CODE http_conn::do_request()
 {   //将网站的根目录先复制到m_real_file中
@@ -433,6 +417,7 @@ bool http_conn::add_status_line(int status, const char * title)
 bool http_conn::add_headers(int content_len)
 {
     add_content_length(content_len);
+    add_content_type();
     add_linger();
     add_blank_line();
     return true;
@@ -458,6 +443,9 @@ bool http_conn::add_content(const char* content)
     return add_response("%s", content);
 }
 
+bool http_conn::add_content_type() {
+    return add_response("Content-Type:%s\r\n", "text/html");
+}
 bool http_conn::process_write(HTTP_CODE ret)
 {
     switch(ret)
@@ -505,26 +493,19 @@ bool http_conn::process_write(HTTP_CODE ret)
         {
             add_status_line(200, ok_200_title);
             //文件大小不为0
-            if(m_file_stat.st_size != 0)
-            {
+            
+            
                 add_headers(m_file_stat.st_size);
                 m_iv[0].iov_base = m_write_buf;
                 m_iv[0].iov_len = m_write_idx;
                 m_iv[1].iov_base = m_file_address;
                 m_iv[1].iov_len = m_file_stat.st_size;
                 m_iv_count = 2;
+
+                 bytes_to_send = m_write_idx + m_file_stat.st_size;
                 return true;
-            }
-            //文件大小为0
-            else
-            {
-                const char * ok_string = "<html><body></body></html>";
-                add_headers(strlen(ok_string));
-                if( !add_content(ok_string))
-                {
-                    return false;
-                }
-            }
+            
+            
         }
         default:
         {
@@ -536,4 +517,23 @@ bool http_conn::process_write(HTTP_CODE ret)
     m_iv_count = 1;
     bytes_to_send = m_write_idx;
     return true;
+}
+
+// 由线程池中的工作线程调用，这是处理HTTP请求的入口函数
+//这里因为设置了EPOLLONESHOT事件，所以每次使用都要再modfd一下
+void http_conn::process() {
+
+    // 解析HTTP请求
+    HTTP_CODE read_ret = process_read();
+    if ( read_ret == NO_REQUEST ) {
+        modfd( m_epollfd, m_sockfd, EPOLLIN );
+        return;
+    }
+    
+    // 生成响应
+    bool write_ret = process_write( read_ret );
+    if ( !write_ret ) {
+        close_conn();
+    }
+    modfd( m_epollfd, m_sockfd, EPOLLOUT);
 }
