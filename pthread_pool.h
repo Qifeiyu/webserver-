@@ -5,6 +5,7 @@
 #include"locker.h"
 #include<cstdio>
 #include<exception>
+#include"lst.h"
 //模板类的声明和定义要放在一起，否则C++编译器无法找到函数的定义
 // 线程池类，将它定义为模板类是为了代码复用，模板参数T是任务类
 template<typename T>
@@ -14,7 +15,8 @@ public:
     threadpool(int thread_number = 8, int max_requests = 10000);
     ~threadpool();
     bool append(T* request);
-
+    //定时器链表
+    sort_timer_lst lst;                   
 private:
     /*工作线程运行的函数，它不断从工作队列中取出任务并执行之*/
     //在C++中使用pthread_creat函数时，第三个参数必须指向一个静态函数
@@ -41,14 +43,16 @@ private:
     sem m_queuestat;
 
     // 是否结束线程          
-    bool m_stop;                    
+    bool m_stop; 
+
+
 };
 //T代表任务
 
 //构造函数，初始化线程
 template<typename T>
 threadpool<T>::threadpool(int thread_number, int max_requests) :
-m_thread_number(thread_number),m_max_requests(max_requests),m_stop(false),m_threads(NULL) {
+m_thread_number(thread_number),m_max_requests(max_requests),m_stop(false),m_threads(NULL),lst() {
     //如果这些小于0，抛出异常
     if(m_thread_number <= 0 || m_max_requests <= 0) {
         throw std::exception();

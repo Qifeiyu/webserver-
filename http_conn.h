@@ -20,7 +20,7 @@
 #include <errno.h>
 #include "locker.h"
 #include <sys/uio.h>
-
+#include"lst.h"
 class http_conn
 {
 public:
@@ -28,7 +28,7 @@ public:
     static const int FILENAME_LEN = 200;        // 文件名的最大长度
     static const int READ_BUFFER_SIZE = 2048;   // 读缓冲区的大小
     static const int WRITE_BUFFER_SIZE = 1024;  // 写缓冲区的大小
-    
+    util_timer * timer;
     // HTTP请求方法，这里只支持GET
     enum METHOD {GET = 0, POST, HEAD, PUT, DELETE, TRACE, OPTIONS, CONNECT};
     
