@@ -43,7 +43,7 @@ void sig_handler(int sig)
 
 void timer_handler(threadpool< http_conn >* pool)
 {
-    pool->lst.tick();
+    pool->get_timer_lst().tick();
     alarm(TIMESLOT);
 }
 
@@ -129,7 +129,7 @@ int main( int argc, char* argv[] ) {
 
     while(true) {
         if (timeout) {
-            vector<int> result = pool->lst.tick();
+            vector<int> result = pool->get_timer_lst().tick();
             for(auto fd : result) {
                 users[fd].close_conn();
                 printf("hello close\n");
@@ -177,7 +177,7 @@ int main( int argc, char* argv[] ) {
                 timer->expire = cur + 3 * TIMESLOT;
                 timer->sockfd = connfd;
                 users[sockfd].timer = timer;
-                pool->lst.add_timer(timer);
+                pool->get_timer_lst().add_timer(timer);
                
             }
             //处理信号
@@ -211,7 +211,7 @@ int main( int argc, char* argv[] ) {
             }
             //对方异常断开或者错误等事件            
             else if( events[i].events & ( EPOLLRDHUP | EPOLLHUP | EPOLLERR ) ) {
-                pool->lst.del_timer(users[sockfd].timer);
+                pool->get_timer_lst().del_timer(users[sockfd].timer);
                 users[sockfd].timer = NULL;
                 users[sockfd].close_conn();
                 
@@ -227,10 +227,10 @@ int main( int argc, char* argv[] ) {
                         time_t cur = time(NULL);
                         timer->expire = cur + 3 * TIMESLOT;
                         printf("adjust timer once\n");
-                        pool->lst.adjust_timer(timer);
+                        pool->get_timer_lst().adjust_timer(timer);
                     } 
                 } else {
-                    pool->lst.del_timer(users[sockfd].timer);
+                    pool->get_timer_lst().del_timer(users[sockfd].timer);
                     users[sockfd].timer = NULL;
                     users[sockfd].close_conn();
                 }
@@ -240,7 +240,7 @@ int main( int argc, char* argv[] ) {
             else if( events[i].events & EPOLLOUT ) {
 
                 if( !users[sockfd].write() ) {
-                    pool->lst.del_timer(users[sockfd].timer);
+                    pool->get_timer_lst().del_timer(users[sockfd].timer);
                     users[sockfd].timer = NULL;
                     users[sockfd].close_conn();
                 }
