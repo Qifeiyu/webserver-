@@ -15,8 +15,8 @@ public:
     threadpool(int thread_number = 8, int max_requests = 10000);
     ~threadpool();
     bool append(T* request);
-    //定时器链表
-    sort_timer_lst lst;                   
+    sort_timer_lst get_timer_lst();
+                  
 private:
     /*工作线程运行的函数，它不断从工作队列中取出任务并执行之*/
     //在C++中使用pthread_creat函数时，第三个参数必须指向一个静态函数
@@ -45,6 +45,8 @@ private:
     // 是否结束线程          
     bool m_stop; 
 
+    //定时器链表
+    sort_timer_lst lst; 
 
 };
 //T代表任务
@@ -132,5 +134,12 @@ void  threadpool<T>::run() {
         if(!request) continue;
         request->process();
     }
+}
+
+//获得定时器链表
+template<typename T>
+sort_timer_lst threadpool<T>::get_timer_lst()
+{
+    return lst;
 }
 #endif
